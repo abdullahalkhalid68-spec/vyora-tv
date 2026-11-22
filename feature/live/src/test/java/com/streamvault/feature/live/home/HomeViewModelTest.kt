@@ -1,0 +1,1271 @@
+package com.streamvault.feature.live.home
+
+import android.app.Application
+import androidx.lifecycle.ViewModel
+import com.streamvault.feature.live.api.LiveMultiViewStatus
+import com.streamvault.feature.live.api.LiveMultiViewStatusPort
+import com.streamvault.feature.live.api.LivePreviewHandoffPort
+import com.streamvault.feature.live.api.LivePreviewOrigin
+import com.streamvault.feature.live.api.LivePreviewSession
+import com.streamvault.feature.live.api.LivePreviewStreamPreparer
+import com.streamvault.feature.live.api.LiveSurfaceRefreshPort
+import com.streamvault.data.preferences.PreferencesRepository
+import com.streamvault.data.sync.SyncManager
+import com.streamvault.domain.manager.ParentalControlManager
+import com.streamvault.domain.model.ActiveLiveSource
+import com.streamvault.domain.model.Category
+import com.streamvault.domain.model.CategorySortMode
+import com.streamvault.domain.model.Channel
+import com.streamvault.domain.model.ChannelNumberingMode
+import com.streamvault.domain.model.ContentType
+import com.streamvault.domain.model.Favorite
+import com.streamvault.domain.model.PlaybackHistory
+import com.streamvault.domain.model.LegacyProvider as Provider
+import com.streamvault.domain.model.ProviderType
+import com.streamvault.domain.model.Result
+import com.streamvault.domain.model.StreamInfo
+import com.streamvault.domain.model.SyncState
+import com.streamvault.domain.model.VirtualCategoryIds
+import com.streamvault.domain.repository.*
+import com.streamvault.domain.usecase.GetCustomCategories
+import com.streamvault.domain.usecase.UnlockParentalCategory
+import com.streamvault.player.PlayerEngine
+import com.streamvault.player.PlaybackState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.*
+import org.junit.After
+import org.junit.Before
+import org.junit.Test
+import org.mockito.kotlin.*
+import com.google.common.truth.Truth.assertThat
+import javax.inject.Provider as InjectProvider
+import kotlinx.coroutines.runBlocking
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class HomeViewModelTest {
+
+    private val providerRepository: ProviderRepository = mock()
+    private val combinedM3uRepository: CombinedM3uRepository = mock()
+    private val channelRepository: ChannelRepository = mock()
+    private val liveChannelOrderRepository: LiveChannelOrderRepository = mock()
+    private val categoryRepository: CategoryRepository = mock()
+    private val favoriteRepository: FavoriteRepository = mock()
+    private val m3uClassificationRepository: M3uClassificationRepository = mock()
+    private val preferencesRepository: PreferencesRepository = mock()
+    private val epgRepository: EpgRepository = mock()
+    private val playbackHistoryRepository: PlaybackHistoryRepository = mock()
+    private val getCustomCategories: GetCustomCategories = mock()
+    private val unlockParentalCategory: UnlockParentalCategory = mock()
+    private val parentalControlManager: ParentalControlManager = mock()
+    private val syncManager: SyncManager = mock()
+    private val tvInputChannelSyncManager: LiveSurfaceRefreshPort = mock()
+    private val multiViewStatusPort: LiveMultiViewStatusPort = mock()
+    private val livePreviewHandoffManager: LivePreviewHandoffPort = mock()
+    private val pluginManager: LivePreviewStreamPreparer = mock()
+    private val playerEngine: PlayerEngine = mock()
+    private val playerEngineProvider: InjectProvider<PlayerEngine> = mock()
+    private val application: Application = mock()
+    private lateinit var reverseHandoffOrigin: MutableStateFlow<LivePreviewOrigin?>
+    private val createdViewModels = mutableListOf<HomeViewModel>()
+
+    private lateinit var viewModel: HomeViewModel
+
+    private val testDispatcher = StandardTestDispatcher()
+
+    @Before
+    fun setup() {
+        Dispatchers.setMain(testDispatcher)
+        whenever(preferencesRepository.getLiveCategoryOrder(any())).thenAnswer { call ->
+            val id = call.getArgument<Long>(0)
+            kotlinx.coroutines.flow.combine(preferencesRepository.getCategorySortMode(id, ContentType.LIVE), preferencesRepository.getPinnedCategoryIds(id, ContentType.LIVE)) { mode, pins ->
+                com.streamvault.domain.model.LiveCategoryOrder(sortMode = mode, pinnedCategoryIds = pins)
+            }
+        }
+        whenever(application.getString(any())).thenReturn("test-message")
+
+        // Mock default flows to prevent exceptions during init
+        whenever(liveChannelOrderRepository.observe(any())).thenReturn(flowOf(com.streamvault.domain.model.LiveChannelOrder()))
+        whenever(providerRepository.getProviders()).thenReturn(flowOf(emptyList()))
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(null))
+        whenever(combinedM3uRepository.getActiveLiveSource()).thenReturn(flowOf(null))
+        whenever(combinedM3uRepository.getActiveLiveSourceOptions()).thenReturn(flowOf(emptyList()))
+        reverseHandoffOrigin = MutableStateFlow(null)
+        whenever(livePreviewHandoffManager.reverseHandoffOrigin).thenReturn(reverseHandoffOrigin)
+        whenever(multiViewStatusPort.status).thenReturn(flowOf(LiveMultiViewStatus()))
+        whenever(preferencesRepository.defaultLiveChannelOrder).thenReturn(flowOf(com.streamvault.domain.model.LiveChannelOrderMode.PROVIDER))
+        whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
+        whenever(favoriteRepository.getFavorites(any<Long>(), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(any<List<Long>>(), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(preferencesRepository.defaultCategoryId).thenReturn(flowOf(null))
+        whenever(preferencesRepository.getLastLiveCategoryId(any())).thenReturn(flowOf(null))
+        whenever(preferencesRepository.liveTvChannelMode).thenReturn(flowOf("COMPACT"))
+        whenever(preferencesRepository.liveTvAutoHideCategories).thenReturn(flowOf(false))
+        whenever(preferencesRepository.liveTvCategoryFilters).thenReturn(flowOf(emptyList()))
+        whenever(preferencesRepository.liveTvQuickFilterVisibility).thenReturn(flowOf(null))
+        whenever(preferencesRepository.showRecentChannelsCategory).thenReturn(flowOf(true))
+        whenever(preferencesRepository.showAllChannelsCategory).thenReturn(flowOf(true))
+        whenever(preferencesRepository.showFavoritesCategory).thenReturn(flowOf(true))
+        whenever(preferencesRepository.showLiveSourceSwitcher).thenReturn(flowOf(false))
+        whenever(preferencesRepository.multiViewCenterTwoSlotLayout).thenReturn(flowOf(false))
+        whenever(preferencesRepository.liveChannelNumberingMode).thenReturn(flowOf(ChannelNumberingMode.PROVIDER))
+        whenever(preferencesRepository.isIncognitoMode).thenReturn(flowOf(false))
+        whenever(preferencesRepository.getHiddenCategoryIds(any(), any())).thenReturn(flowOf(emptySet()))
+        whenever(preferencesRepository.getHiddenChannelIds(any())).thenReturn(flowOf(emptySet()))
+        whenever(preferencesRepository.getCategorySortMode(any(), any())).thenReturn(flowOf(CategorySortMode.DEFAULT))
+        whenever(preferencesRepository.getPinnedCategoryIds(any(), any())).thenReturn(flowOf(emptySet()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(any(), any())).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(any<Long>(), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(any<List<Long>>(), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavoritesByGroup(any())).thenReturn(flowOf(emptyList()))
+        whenever(parentalControlManager.unlockedCategoriesForProvider(any())).thenReturn(flowOf(emptySet()))
+        whenever(syncManager.syncStateForProvider(any())).thenReturn(flowOf(SyncState.Idle))
+        runBlocking {
+            whenever(epgRepository.getResolvedProgramsForChannels(any(), any(), any(), any())).thenReturn(emptyMap())
+            whenever(preferencesRepository.setLastActiveProviderId(any())).thenReturn(Unit)
+        }
+        whenever(playerEngineProvider.get()).thenReturn(playerEngine)
+        runBlocking {
+            whenever(pluginManager.prepare(any())).thenAnswer { invocation ->
+                Result.Success(invocation.getArgument<StreamInfo>(0))
+            }
+        }
+
+        viewModel = createViewModel()
+    }
+
+    @After
+    fun tearDown() {
+        createdViewModels.asReversed().forEach(::clearViewModel)
+        createdViewModels.clear()
+        testDispatcher.scheduler.advanceUntilIdle()
+        Dispatchers.resetMain()
+    }
+
+    private fun createViewModel(usage: com.streamvault.domain.repository.LiveWatchUsageRepository? = null): HomeViewModel =
+        HomeViewModel(
+            application = application,
+            providerRepository = providerRepository,
+            combinedM3uRepository = combinedM3uRepository,
+            channelRepository = channelRepository,
+            categoryRepository = categoryRepository,
+            liveChannelOrderRepository = liveChannelOrderRepository,
+            favoriteRepository = favoriteRepository,
+            m3uClassificationRepository = m3uClassificationRepository,
+            preferencesRepository = preferencesRepository,
+            epgRepository = epgRepository,
+            playbackHistoryRepository = playbackHistoryRepository,
+            getCustomCategories = getCustomCategories,
+            unlockParentalCategory = unlockParentalCategory,
+            parentalControlManager = parentalControlManager,
+            syncManager = syncManager,
+            tvInputChannelSyncManager = tvInputChannelSyncManager,
+            multiViewStatusPort = multiViewStatusPort,
+            livePreviewHandoffManager = livePreviewHandoffManager,
+            pluginManager = pluginManager,
+            playerEngineProvider = playerEngineProvider,
+            liveWatchUsageRepository = usage
+        ).also(createdViewModels::add)
+
+    private fun clearViewModel(viewModel: HomeViewModel) {
+        val clearMethod = ViewModel::class.java.declaredMethods.firstOrNull {
+            it.parameterCount == 0 && it.name.startsWith("clear")
+        } ?: error("Unable to find ViewModel clear method")
+        clearMethod.isAccessible = true
+        clearMethod.invoke(viewModel)
+    }
+
+    @Test
+    fun `when switchProvider is called, it delegates to repository`() = runTest {
+        viewModel.switchProvider(1L)
+        runCurrent()
+        verify(providerRepository).setActiveProvider(1L)
+        verify(combinedM3uRepository).setActiveLiveSource(ActiveLiveSource.ProviderSource(1L))
+    }
+
+    @Test
+    fun `channel dialog exposes saved group memberships as virtual category ids`() = runTest {
+        val channel = Channel(id = 42L, name = "Grouped channel", providerId = 7L)
+        whenever(favoriteRepository.getGroupMemberships(7L, 42L, ContentType.LIVE))
+            .thenReturn(listOf(1L, 23L))
+
+        viewModel.onShowDialog(channel)
+        runCurrent()
+
+        assertThat(viewModel.uiState.value.dialogGroupMemberships)
+            .containsExactly(-1L, -23L)
+        assertThat(viewModel.uiState.value.showDialog).isTrue()
+    }
+
+    @Test
+    fun `removing a channel from a custom group uses its saved group id`() = runTest {
+        val channel = Channel(id = 42L, name = "Grouped channel", providerId = 7L)
+        val group = Category(id = -23L, name = "My channels", type = ContentType.LIVE, isVirtual = true)
+        whenever(favoriteRepository.removeFavorite(7L, 42L, ContentType.LIVE, 23L))
+            .thenReturn(Result.Success(Unit))
+
+        viewModel.removeFromGroup(channel, group)
+        runCurrent()
+
+        verify(favoriteRepository).removeFavorite(7L, 42L, ContentType.LIVE, 23L)
+        verify(favoriteRepository, never()).removeFavorite(7L, 42L, ContentType.LIVE, null)
+    }
+
+    @Test
+    fun `initial state has empty categories and is loading`() = runTest {
+        val state = viewModel.uiState.value
+        assertThat(state.isLoading).isTrue()
+        assertThat(state.categories).isEmpty()
+        assertThat(state.filteredChannels).isEmpty()
+    }
+
+    @Test
+    fun `preview selection updates preview state without changing browse state`() = runTest {
+        whenever(preferencesRepository.liveTvChannelMode).thenReturn(flowOf("PRO"))
+        whenever(preferencesRepository.playerAudioDecoderMode).thenReturn(
+            flowOf(com.streamvault.domain.model.DecoderMode.AUTO)
+        )
+        whenever(preferencesRepository.playerVideoDecoderMode).thenReturn(
+            flowOf(com.streamvault.domain.model.DecoderMode.AUTO)
+        )
+        whenever(preferencesRepository.playerSurfaceMode).thenReturn(
+            flowOf(com.streamvault.domain.model.PlayerSurfaceMode.AUTO)
+        )
+        whenever(preferencesRepository.playerPlaybackBufferMode).thenReturn(
+            flowOf(com.streamvault.domain.model.PlaybackBufferMode.AUTO)
+        )
+        whenever(preferencesRepository.playerFastRetryOnTransientFailures).thenReturn(flowOf(false))
+        whenever(playerEngine.playbackState).thenReturn(
+            MutableStateFlow(com.streamvault.player.PlaybackState.IDLE)
+        )
+        whenever(playerEngine.isPlaying).thenReturn(MutableStateFlow(false))
+        whenever(playerEngine.playerStats).thenReturn(
+            MutableStateFlow(com.streamvault.player.PlayerStats())
+        )
+        whenever(playerEngine.error).thenReturn(flowOf(null))
+        whenever(channelRepository.getStreamInfo(any(), any())).thenReturn(
+            Result.Success(StreamInfo(url = "https://example.com/live.m3u8"))
+        )
+        val previewViewModel = createViewModel()
+        advanceUntilIdle()
+
+        val browseStateBeforePreview = previewViewModel.uiState.value
+        val channel = Channel(id = 42L, name = "Preview Channel", providerId = 7L)
+
+        previewViewModel.previewChannel(channel)
+
+        assertThat(previewViewModel.previewUiState.value.previewChannelId).isEqualTo(channel.id)
+        assertThat(previewViewModel.previewUiState.value.previewPlayerEngine).isSameInstanceAs(playerEngine)
+        assertThat(previewViewModel.previewUiState.value.isPreviewLoading).isTrue()
+        assertThat(previewViewModel.uiState.value).isEqualTo(browseStateBeforePreview)
+    }
+
+    @Test
+    fun `isPreviewing reports whether a channel owns the active preview`() = runTest {
+        whenever(preferencesRepository.liveTvChannelMode).thenReturn(flowOf("PRO"))
+        whenever(preferencesRepository.playerAudioDecoderMode).thenReturn(
+            flowOf(com.streamvault.domain.model.DecoderMode.AUTO)
+        )
+        whenever(preferencesRepository.playerVideoDecoderMode).thenReturn(
+            flowOf(com.streamvault.domain.model.DecoderMode.AUTO)
+        )
+        whenever(preferencesRepository.playerSurfaceMode).thenReturn(
+            flowOf(com.streamvault.domain.model.PlayerSurfaceMode.AUTO)
+        )
+        whenever(preferencesRepository.playerPlaybackBufferMode).thenReturn(
+            flowOf(com.streamvault.domain.model.PlaybackBufferMode.AUTO)
+        )
+        whenever(preferencesRepository.playerFastRetryOnTransientFailures).thenReturn(flowOf(false))
+        whenever(playerEngine.playbackState).thenReturn(
+            MutableStateFlow(com.streamvault.player.PlaybackState.IDLE)
+        )
+        whenever(playerEngine.isPlaying).thenReturn(MutableStateFlow(false))
+        whenever(playerEngine.playerStats).thenReturn(
+            MutableStateFlow(com.streamvault.player.PlayerStats())
+        )
+        whenever(playerEngine.error).thenReturn(flowOf(null))
+        whenever(channelRepository.getStreamInfo(any(), any())).thenReturn(
+            Result.Success(StreamInfo(url = "https://example.com/live.m3u8"))
+        )
+        val previewViewModel = createViewModel()
+        advanceUntilIdle()
+        val channel = Channel(id = 42L, name = "Preview Channel", providerId = 7L)
+
+        previewViewModel.previewChannel(channel)
+
+        assertThat(previewViewModel.isPreviewing(channel.id)).isTrue()
+        assertThat(previewViewModel.isPreviewing(channel.id + 1L)).isFalse()
+    }
+
+    @Test
+    fun `preview preparation registers HOME session through the handoff port`() = runTest {
+        configurePreviewDependencies()
+        val streamInfo = StreamInfo(url = "https://example.com/live.m3u8")
+        whenever(channelRepository.getStreamInfo(any(), any())).thenReturn(Result.Success(streamInfo))
+        whenever(pluginManager.prepare(any())).thenReturn(Result.Success(streamInfo))
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        val channel = Channel(id = 101L, name = "Port Channel", providerId = 7L)
+        viewModel.previewChannel(channel)
+        advanceUntilIdle()
+
+        verify(livePreviewHandoffManager).registerPreviewSession(
+            eq(channel),
+            eq(streamInfo),
+            same(playerEngine),
+            eq(LivePreviewOrigin.HOME)
+        )
+        assertThat(viewModel.previewUiState.value.previewChannelId).isEqualTo(channel.id)
+    }
+
+    @Test
+    fun `preview preparation error is exposed without registering a session`() = runTest {
+        configurePreviewDependencies()
+        whenever(channelRepository.getStreamInfo(any(), any())).thenReturn(
+            Result.Success(StreamInfo(url = "https://example.com/live.m3u8"))
+        )
+        whenever(pluginManager.prepare(any())).thenReturn(Result.Error("renewal failed"))
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.previewChannel(Channel(id = 102L, name = "Error Channel", providerId = 7L))
+        advanceUntilIdle()
+
+        assertThat(viewModel.uiState.value.liveTvChannelMode).isEqualTo(com.streamvault.domain.model.LiveTvChannelMode.PRO)
+        verify(channelRepository).getStreamInfo(any(), eq(false))
+        verify(pluginManager).prepare(any())
+        assertThat(viewModel.previewUiState.value.previewErrorMessage).isEqualTo("renewal failed")
+        verify(livePreviewHandoffManager, never()).registerPreviewSession(any<Channel>(), any(), any(), any())
+    }
+
+    @Test
+    fun `preview clears engine error when playback recovers`() = runTest {
+        configurePreviewDependencies()
+        val playbackState = MutableStateFlow(PlaybackState.IDLE)
+        whenever(playerEngine.playbackState).thenReturn(playbackState)
+        whenever(channelRepository.getStreamInfo(any(), any())).thenReturn(
+            Result.Success(StreamInfo(url = "https://example.com/live.m3u8"))
+        )
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.previewChannel(Channel(id = 103L, name = "Recovery Channel", providerId = 7L))
+        advanceUntilIdle()
+
+        playbackState.value = PlaybackState.ERROR
+        runCurrent()
+        assertThat(viewModel.previewUiState.value.previewErrorMessage).isEqualTo("test-message")
+
+        playbackState.value = PlaybackState.READY
+        runCurrent()
+        assertThat(viewModel.previewUiState.value.previewErrorMessage).isNull()
+    }
+
+    @Test
+    fun `fullscreen handoff delegates and clears local preview only on success`() = runTest {
+        configurePreviewDependencies()
+        val streamInfo = StreamInfo(url = "https://example.com/live.m3u8")
+        whenever(channelRepository.getStreamInfo(any(), any())).thenReturn(Result.Success(streamInfo))
+        whenever(pluginManager.prepare(any())).thenReturn(Result.Success(streamInfo))
+        viewModel = createViewModel()
+        advanceUntilIdle()
+        val channel = Channel(id = 103L, name = "Handoff Channel", providerId = 7L)
+        viewModel.previewChannel(channel)
+        advanceUntilIdle()
+
+        whenever(livePreviewHandoffManager.beginFullscreenHandoff(channel.id, playerEngine)).thenReturn(false)
+        assertThat(viewModel.beginPreviewHandoff(channel)).isFalse()
+        assertThat(viewModel.previewUiState.value.previewChannelId).isEqualTo(channel.id)
+
+        whenever(livePreviewHandoffManager.beginFullscreenHandoff(channel.id, playerEngine)).thenReturn(true)
+        assertThat(viewModel.beginPreviewHandoff(channel)).isTrue()
+        verify(livePreviewHandoffManager, times(2)).beginFullscreenHandoff(channel.id, playerEngine)
+        assertThat(viewModel.previewUiState.value.previewChannelId).isNull()
+        assertThat(viewModel.previewUiState.value.previewPlayerEngine).isNull()
+    }
+
+    @Test
+    fun `multi view status is mapped into HomeUiState`() = runTest {
+        whenever(multiViewStatusPort.status).thenReturn(flowOf(LiveMultiViewStatus(channelCount = 3, slotCapacity = 6)))
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        assertThat(viewModel.uiState.value.multiviewChannelCount).isEqualTo(3)
+        assertThat(viewModel.uiState.value.multiviewSlotCapacity).isEqualTo(6)
+    }
+
+    @Test
+    fun `reverse HOME handoff resumes preview while GUIDE notifications are ignored`() = runTest {
+        configurePreviewDependencies()
+        val streamInfo = StreamInfo(url = "https://example.com/live.m3u8")
+        whenever(livePreviewHandoffManager.consumeReverseHandoff(LivePreviewOrigin.HOME)).thenReturn(
+            LivePreviewSession(
+                engine = playerEngine,
+                channelId = 104L,
+                providerId = 7L,
+                streamInfo = streamInfo
+            )
+        )
+        clearViewModel(viewModel)
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        reverseHandoffOrigin.value = LivePreviewOrigin.GUIDE
+        advanceUntilIdle()
+        verify(livePreviewHandoffManager, never()).consumeReverseHandoff(LivePreviewOrigin.GUIDE)
+
+        reverseHandoffOrigin.value = LivePreviewOrigin.HOME
+        advanceUntilIdle()
+
+        verify(livePreviewHandoffManager).consumeReverseHandoff(LivePreviewOrigin.HOME)
+        verify(livePreviewHandoffManager).registerPreviewSession(
+            eq(104L),
+            eq(7L),
+            eq(streamInfo),
+            same(playerEngine),
+            eq(LivePreviewOrigin.HOME)
+        )
+        assertThat(viewModel.previewUiState.value.previewChannelId).isEqualTo(104L)
+        assertThat(viewModel.previewUiState.value.previewPlayerEngine).isSameInstanceAs(playerEngine)
+    }
+
+    @Test
+    fun `clearing preview delegates release and clears local ownership`() = runTest {
+        configurePreviewDependencies()
+        val streamInfo = StreamInfo(url = "https://example.com/live.m3u8")
+        whenever(channelRepository.getStreamInfo(any(), any())).thenReturn(Result.Success(streamInfo))
+        whenever(pluginManager.prepare(any())).thenReturn(Result.Success(streamInfo))
+        viewModel = createViewModel()
+        advanceUntilIdle()
+        val channel = Channel(id = 105L, name = "Clear Channel", providerId = 7L)
+        viewModel.previewChannel(channel)
+        advanceUntilIdle()
+
+        clearInvocations(livePreviewHandoffManager, playerEngine)
+        viewModel.clearPreview()
+
+        verify(livePreviewHandoffManager).clear(same(playerEngine))
+        verify(playerEngine).stop()
+        verify(playerEngine).release()
+        assertThat(viewModel.previewUiState.value.previewChannelId).isNull()
+        assertThat(viewModel.previewUiState.value.previewPlayerEngine).isNull()
+    }
+
+    private fun configurePreviewDependencies() {
+        whenever(preferencesRepository.liveTvChannelMode).thenReturn(flowOf("PRO"))
+        whenever(preferencesRepository.playerAudioDecoderMode).thenReturn(
+            flowOf(com.streamvault.domain.model.DecoderMode.AUTO)
+        )
+        whenever(preferencesRepository.playerVideoDecoderMode).thenReturn(
+            flowOf(com.streamvault.domain.model.DecoderMode.AUTO)
+        )
+        whenever(preferencesRepository.playerSurfaceMode).thenReturn(
+            flowOf(com.streamvault.domain.model.PlayerSurfaceMode.AUTO)
+        )
+        whenever(preferencesRepository.playerPlaybackBufferMode).thenReturn(
+            flowOf(com.streamvault.domain.model.PlaybackBufferMode.AUTO)
+        )
+        whenever(preferencesRepository.playerFastRetryOnTransientFailures).thenReturn(flowOf(false))
+        whenever(playerEngine.playbackState).thenReturn(MutableStateFlow(PlaybackState.IDLE))
+        whenever(playerEngine.isPlaying).thenReturn(MutableStateFlow(false))
+        whenever(playerEngine.playerStats).thenReturn(MutableStateFlow(com.streamvault.player.PlayerStats()))
+        whenever(playerEngine.error).thenReturn(flowOf(null))
+    }
+
+    @Test
+    fun `updateCategorySearchQuery updates state`() = runTest {
+        viewModel.updateCategorySearchQuery("News")
+        assertThat(viewModel.uiState.value.categorySearchQuery).isEqualTo("News")
+    }
+
+    @Test
+    fun `updateChannelSearchQuery updates state and triggers filtering`() = runTest {
+        viewModel.updateChannelSearchQuery("CNN")
+        assertThat(viewModel.uiState.value.channelSearchQuery).isEqualTo("CNN")
+    }
+
+    @Test
+    fun `selectCategory sets selected category and triggers loading`() = runTest {
+        val category = Category(id = 1L, name = "Sports", parentId = null)
+        
+        // Mock the repositories needed for loading channels
+        whenever(channelRepository.getChannelsByCategoryPage(any(), any(), any())).thenReturn(flowOf(emptyList()))
+        val provider = Provider(id = 1L, name = "Provider", type = com.streamvault.domain.model.ProviderType.M3U, serverUrl = "http://test")
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.selectCategory(category)
+        advanceUntilIdle()
+        
+        val state = viewModel.uiState.value
+        assertThat(state.selectedCategory).isEqualTo(category)
+        assertThat(state.isLoading).isFalse()
+    }
+
+    private suspend fun prepareProviderReorder(count: Int = 500): Pair<Category, List<Channel>> {
+        val provider = Provider(id = 71L, name = "Provider", type = ProviderType.M3U, serverUrl = "https://test", createdAt = 123)
+        val category = Category(id = 12L, name = "Sports", count = count)
+        val channels = (1..count).map { Channel(id = it.toLong(), providerId = provider.id, streamId = it.toLong(), name = "Channel $it") }
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(providerRepository.getProvider(provider.id)).thenReturn(provider)
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(listOf(category)))
+        whenever(preferencesRepository.defaultCategoryId).thenReturn(flowOf(category.id))
+        whenever(channelRepository.getChannelsByCategoryPage(eq(provider.id), eq(category.id), any())).thenAnswer { call ->
+            flowOf(channels.take(call.getArgument<Int>(2)))
+        }
+        whenever(channelRepository.getChannelsByCategory(provider.id, category.id)).thenReturn(flowOf(channels))
+        viewModel = createViewModel()
+        testDispatcher.scheduler.advanceUntilIdle()
+        return category to channels
+    }
+
+    @Test fun `browse advances past 200 and 400 to the last channel and resets on category change`() = runTest {
+        val (category, channels) = prepareProviderReorder(525)
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(200)
+        assertThat(viewModel.uiState.value.channelResultCount).isEqualTo(525)
+        assertThat(viewModel.uiState.value.hasMoreChannels).isTrue()
+        viewModel.loadMoreChannels()
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(400)
+        viewModel.loadMoreChannels()
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).isEqualTo(channels)
+        assertThat(viewModel.uiState.value.hasMoreChannels).isFalse()
+        val small = category.copy(id = 13, name = "News", count = 8)
+        whenever(channelRepository.getChannelsByCategoryPage(eq(71L), eq(small.id), any()))
+            .thenReturn(flowOf(channels.take(8)))
+        viewModel.selectCategory(small)
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.channelResultCount).isEqualTo(8)
+        viewModel.selectCategory(category)
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(200)
+        assertThat(viewModel.uiState.value.channelResultCount).isEqualTo(525)
+    }
+
+    @Test fun `search advances beyond first search page and clearing search restores browse total`() = runTest {
+        val (_, channels) = prepareProviderReorder(725)
+        whenever(channelRepository.searchChannelsByCategoryPaged(eq(71L), eq(12L), eq("Channel"), any()))
+            .thenAnswer { call -> flowOf(channels.take(call.getArgument<Int>(3))) }
+        viewModel.updateChannelSearchQuery("Channel")
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(300)
+        viewModel.loadMoreChannels()
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(600)
+        viewModel.loadMoreChannels()
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels.last().id).isEqualTo(725)
+        assertThat(viewModel.uiState.value.hasMoreChannels).isFalse()
+        viewModel.updateChannelSearchQuery("")
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(200)
+        assertThat(viewModel.uiState.value.channelResultCount).isEqualTo(725)
+    }
+
+    @Test fun `combined live categories apply profile ordering and pinned sections`() = runTest {
+        val profile = com.streamvault.domain.model.CombinedM3uProfile(
+            id = 31L, identityKey = "combined-home-profile", name = "Family",
+            members = listOf(com.streamvault.domain.model.CombinedM3uProfileMember(
+                profileId = 31L, providerId = 7L, priority = 0
+            ))
+        )
+        val news = Category(id = com.streamvault.domain.model.CombinedCategoryIdentity.idForName("News"), name = "News")
+        val sports = Category(id = com.streamvault.domain.model.CombinedCategoryIdentity.idForName("Sports"), name = "Sports")
+        val saved = com.streamvault.domain.model.LiveCategoryOrder(
+            sortMode = CategorySortMode.MANUAL,
+            normalIds = listOf(news.id, sports.id),
+            pinnedIds = listOf(sports.id),
+            pinnedCategoryIds = setOf(sports.id)
+        )
+        whenever(combinedM3uRepository.getActiveLiveSource()).thenReturn(
+            flowOf(ActiveLiveSource.CombinedM3uSource(profile.id))
+        )
+        whenever(combinedM3uRepository.getProfile(profile.id)).thenReturn(profile)
+        whenever(combinedM3uRepository.getCombinedCategories(profile.id)).thenReturn(flowOf(listOf(
+            com.streamvault.domain.model.CombinedCategory(news, emptyList()),
+            com.streamvault.domain.model.CombinedCategory(sports, emptyList())
+        )))
+        whenever(preferencesRepository.getCombinedLiveCategoryOrder(profile.identityKey)).thenReturn(flowOf(saved))
+        whenever(favoriteRepository.getFavorites(listOf(7L), ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+        viewModel = createViewModel()
+
+        advanceUntilIdle()
+
+        assertThat(viewModel.uiState.value.isCombinedLiveSource).isTrue()
+        assertThat(viewModel.uiState.value.pinnedCategoryIds).containsExactly(sports.id)
+        assertThat(viewModel.uiState.value.categories.map { it.id }.filter { it == news.id || it == sports.id })
+            .containsExactly(sports.id, news.id).inOrder()
+    }
+
+    @Test fun `provider reorder loads the entire category not the first browse page`() = runTest {
+        val (category, channels) = prepareProviderReorder()
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(200)
+        viewModel.enterChannelReorderMode(category)
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(500)
+        viewModel.moveChannelUp(channels.last())
+        assertThat(viewModel.uiState.value.filteredChannels[498].id).isEqualTo(500L)
+        viewModel.exitChannelReorderMode()
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.isChannelReorderMode).isFalse()
+        verify(liveChannelOrderRepository, never()).save(any(), any(), any())
+    }
+
+    @Test fun `unchanged provider reorder does not create a manual override`() = runTest {
+        val (category, _) = prepareProviderReorder()
+        viewModel.enterChannelReorderMode(category)
+        advanceUntilIdle()
+        viewModel.saveChannelReorder()
+        advanceUntilIdle()
+        verify(liveChannelOrderRepository, never()).save(any(), any(), any())
+        assertThat(viewModel.uiState.value.isChannelReorderMode).isFalse()
+    }
+
+    @Test fun `failed provider save keeps editable draft and original persistence`() = runTest {
+        val (category, channels) = prepareProviderReorder()
+        whenever(liveChannelOrderRepository.save(any(), any(), any())).thenThrow(IllegalStateException("disk unavailable"))
+        viewModel.enterChannelReorderMode(category)
+        advanceUntilIdle()
+        viewModel.moveChannelDown(channels.first())
+        viewModel.saveChannelReorder()
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.isChannelReorderMode).isTrue()
+        assertThat(viewModel.uiState.value.isSavingChannelOrder).isFalse()
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(2L)
+    }
+
+    @Test fun `stale provider save reports conflict and does not close draft`() = runTest {
+        val (category, channels) = prepareProviderReorder()
+        whenever(liveChannelOrderRepository.save(any(), any(), any())).thenReturn(
+            LiveChannelOrderSaveResult.Conflict(com.streamvault.domain.model.LiveChannelOrder(revision = 2)))
+        viewModel.enterChannelReorderMode(category)
+        advanceUntilIdle()
+        viewModel.moveChannelDown(channels.first())
+        viewModel.saveChannelReorder()
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.isChannelReorderMode).isTrue()
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(2L)
+        assertThat(viewModel.uiState.value.userMessage).isEqualTo("test-message")
+    }
+
+    @Test fun `direct position moves support large lists undo redo and canceled pickup`() = runTest {
+        val (category, channels) = prepareProviderReorder(2000)
+        viewModel.enterChannelReorderMode(category)
+        advanceUntilIdle()
+        viewModel.moveChannelToPosition(channels.last(), 1)
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(2000L)
+        viewModel.undoChannelReorder()
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(1L)
+        viewModel.redoChannelReorder()
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(2000L)
+        viewModel.beginChannelReorderMove()
+        viewModel.moveChannelDown(channels.last())
+        viewModel.cancelChannelReorderMove()
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(2000L)
+        assertThat(viewModel.uiState.value.canUndoChannelReorder).isTrue()
+    }
+
+    @Test fun `locked adult category cannot enter reorder through direct entry`() = runTest {
+        whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(1))
+        val (category, _) = prepareProviderReorder()
+        viewModel.enterChannelReorderMode(category.copy(isAdult = true))
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.isChannelReorderMode).isFalse()
+        verify(channelRepository, never()).getChannelsByCategory(any(), any())
+    }
+
+    @Test fun `successful provider save persists remote keys and reloads manual order`() = runTest {
+        val orders = MutableStateFlow(com.streamvault.domain.model.LiveChannelOrder())
+        whenever(liveChannelOrderRepository.observe(any())).thenReturn(orders)
+        whenever(liveChannelOrderRepository.save(any(), any(), any())).thenAnswer { invocation ->
+            val requested = invocation.getArgument<com.streamvault.domain.model.LiveChannelOrder>(2)
+            orders.value = requested.copy(revision = 1)
+            LiveChannelOrderSaveResult.Saved(orders.value)
+        }
+        val (category, channels) = prepareProviderReorder()
+        viewModel.enterChannelReorderMode(category)
+        advanceUntilIdle()
+        viewModel.moveChannelToPosition(channels.last(), 1)
+        viewModel.saveChannelReorder()
+        advanceUntilIdle()
+        assertThat(orders.value.manualKeys.first()).isEqualTo("stream:500")
+        assertThat(viewModel.uiState.value.isChannelReorderMode).isFalse()
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(500L)
+        verify(favoriteRepository, never()).reorderFavorites(any())
+    }
+
+    @Test fun `favorite reorder detects a concurrent phone save and retains the draft`() = runTest {
+        val (_, rows) = prepareProviderReorder(2)
+        val favorites = rows.mapIndexed { index, row -> Favorite(id = index + 1L, providerId = 71, contentId = row.id,
+            contentType = ContentType.LIVE, position = index * 1024, addedAt = index + 1L) }
+        val saved = com.streamvault.domain.model.LiveChannelOrder(revision = 4L)
+        whenever(liveChannelOrderRepository.observe(any())).thenReturn(flowOf(saved))
+        whenever(liveChannelOrderRepository.hasSavedOrder(any())).thenReturn(true)
+        whenever(liveChannelOrderRepository.save(any(), any(), any())).thenReturn(
+            LiveChannelOrderSaveResult.Conflict(saved.copy(revision = 5L))
+        )
+        whenever(favoriteRepository.getFavorites(71, ContentType.LIVE)).thenReturn(flowOf(favorites))
+        whenever(channelRepository.getChannelsByIds(listOf(1, 2))).thenReturn(flowOf(rows))
+        val category = Category(id = VirtualCategoryIds.FAVORITES, name = "Favorites", isVirtual = true)
+        viewModel.selectCategory(category)
+        advanceUntilIdle()
+        viewModel.enterChannelReorderMode(category)
+        advanceUntilIdle()
+        viewModel.moveChannelToPosition(rows.last(), 1)
+        viewModel.saveChannelReorder()
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.isChannelReorderMode).isTrue()
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(2L)
+        assertThat(viewModel.uiState.value.userMessage).isEqualTo("test-message")
+        verify(liveChannelOrderRepository).save(any(), eq(4L), argThat {
+            mode == com.streamvault.domain.model.LiveChannelOrderMode.MANUAL &&
+                manualKeys.take(2) == listOf("stream:2", "stream:1")
+        })
+        verify(favoriteRepository, never()).reorderFavoritesIfUnchanged(any(), any(), anyOrNull(), any(), any())
+    }
+
+    @Test fun `use default keeps saved manual arrangement while restoring browse fallback`() = runTest {
+        val (category, _) = prepareProviderReorder()
+        val saved = com.streamvault.domain.model.LiveChannelOrder(com.streamvault.domain.model.LiveChannelOrderMode.MANUAL, listOf("stream:500"), revision = 3)
+        whenever(liveChannelOrderRepository.observe(any())).thenReturn(flowOf(saved))
+        whenever(liveChannelOrderRepository.save(any(), any(), any())).thenAnswer { invocation ->
+            LiveChannelOrderSaveResult.Saved(invocation.getArgument(2))
+        }
+        viewModel.useDefaultChannelOrder(category)
+        advanceUntilIdle()
+        val capture = argumentCaptor<com.streamvault.domain.model.LiveChannelOrder>()
+        verify(liveChannelOrderRepository).save(any(), eq(3), capture.capture())
+        assertThat(capture.firstValue.mode).isEqualTo(com.streamvault.domain.model.LiveChannelOrderMode.USE_DEFAULT)
+        assertThat(capture.firstValue.manualKeys).isEqualTo(saved.manualKeys)
+    }
+
+    @Test fun `inherited title sort is global before paging and explicit provider ignores default changes`() = runTest {
+        val defaultMode = MutableStateFlow(com.streamvault.domain.model.LiveChannelOrderMode.TITLE_DESC)
+        val order = MutableStateFlow(com.streamvault.domain.model.LiveChannelOrder())
+        whenever(preferencesRepository.defaultLiveChannelOrder).thenReturn(defaultMode)
+        whenever(liveChannelOrderRepository.observe(any())).thenReturn(order)
+        val (_, channels) = prepareProviderReorder(2000)
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(200)
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(999L)
+        defaultMode.value = com.streamvault.domain.model.LiveChannelOrderMode.TITLE_ASC
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels.take(2).map { it.id }).containsExactly(1L, 10L).inOrder()
+        order.value = com.streamvault.domain.model.LiveChannelOrder(com.streamvault.domain.model.LiveChannelOrderMode.PROVIDER)
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).isEqualTo(channels.take(200))
+        defaultMode.value = com.streamvault.domain.model.LiveChannelOrderMode.TITLE_DESC
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).isEqualTo(channels.take(200))
+    }
+
+    @Test fun `usage sorting is global before paging and watch ticks do not move browsing rows`() = runTest {
+        val usage: com.streamvault.domain.repository.LiveWatchUsageRepository = mock()
+        val stats = MutableStateFlow(mapOf("stream:500" to com.streamvault.domain.model.LiveWatchUsage(100, 1000)))
+        val resets = MutableStateFlow(0L)
+        whenever(usage.observe(71)).thenReturn(stats)
+        whenever(usage.resetVersion).thenReturn(resets)
+        whenever(preferencesRepository.defaultLiveChannelOrder).thenReturn(flowOf(com.streamvault.domain.model.LiveChannelOrderMode.MOST_WATCHED))
+        prepareProviderReorder()
+        viewModel = createViewModel(usage)
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(200)
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(500L)
+        stats.value = mapOf("stream:1" to com.streamvault.domain.model.LiveWatchUsage(200, 2000))
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(500L)
+        resets.value++
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(1L)
+    }
+
+    @Test fun `saved manual order is applied before browsing page limit`() = runTest {
+        val (_, channels) = prepareProviderReorder()
+        whenever(liveChannelOrderRepository.observe(any())).thenReturn(flowOf(
+            com.streamvault.domain.model.LiveChannelOrder(com.streamvault.domain.model.LiveChannelOrderMode.MANUAL,
+                listOf("stream:500") + channels.dropLast(1).map { "stream:${it.streamId}" }, revision = 1)))
+        viewModel = createViewModel()
+        advanceUntilIdle()
+        assertThat(viewModel.uiState.value.filteredChannels).hasSize(200)
+        assertThat(viewModel.uiState.value.filteredChannels.first().id).isEqualTo(500L)
+    }
+
+    @Test
+    fun `recent live history becomes a virtual recent category`() = runTest {
+        val provider = Provider(
+            id = 9L,
+            name = "Provider",
+            type = ProviderType.M3U,
+            serverUrl = "http://test"
+        )
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(
+            flowOf(
+                listOf(
+                    Category(
+                        id = VirtualCategoryIds.FAVORITES,
+                        name = "Favorites",
+                        isVirtual = true
+                    )
+                )
+            )
+        )
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(
+            flowOf(
+                listOf(
+                    PlaybackHistory(
+                        contentId = 21L,
+                        contentType = ContentType.LIVE,
+                        providerId = provider.id,
+                        title = "News",
+                        streamUrl = "http://stream"
+                    )
+                )
+            )
+        )
+        whenever(channelRepository.getChannelsByIds(listOf(21L))).thenReturn(
+            flowOf(
+                listOf(
+                    Channel(
+                        id = 21L,
+                        name = "News",
+                        streamUrl = "http://stream",
+                        providerId = provider.id
+                    )
+                )
+            )
+        )
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+
+        advanceUntilIdle()
+
+        assertThat(viewModel.uiState.value.categories.map { it.id }).contains(VirtualCategoryIds.RECENT)
+        assertThat(viewModel.uiState.value.recentChannels.map { it.id }).containsExactly(21L)
+    }
+
+    @Test
+    fun `default live category requests initial channel focus on entry`() = runTest {
+        val provider = Provider(
+            id = 5L,
+            name = "Provider",
+            type = ProviderType.M3U,
+            serverUrl = "http://test"
+        )
+        val sportsCategory = Category(id = 12L, name = "Sports", type = ContentType.LIVE)
+
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(listOf(sportsCategory)))
+        whenever(preferencesRepository.defaultCategoryId).thenReturn(flowOf(sportsCategory.id))
+        whenever(channelRepository.getChannelsByCategoryPage(eq(provider.id), eq(sportsCategory.id), any())).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        val state = viewModel.uiState.value
+        assertThat(state.selectedCategory?.id).isEqualTo(sportsCategory.id)
+        assertThat(state.shouldAutoFocusFirstChannelOnEntry).isTrue()
+
+        viewModel.consumeInitialChannelFocusRequest()
+
+        assertThat(viewModel.uiState.value.shouldAutoFocusFirstChannelOnEntry).isFalse()
+    }
+
+    @Test
+    fun `hidden favorites category is removed from live tv categories`() = runTest {
+        val provider = Provider(
+            id = 8L,
+            name = "Provider",
+            type = ProviderType.M3U,
+            serverUrl = "http://test"
+        )
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(
+            flowOf(
+                listOf(
+                    Category(
+                        id = VirtualCategoryIds.FAVORITES,
+                        name = "Favorites",
+                        type = ContentType.LIVE,
+                        isVirtual = true
+                    )
+                )
+            )
+        )
+        whenever(preferencesRepository.showFavoritesCategory).thenReturn(flowOf(false))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        assertThat(viewModel.uiState.value.categories.map { it.id }).doesNotContain(VirtualCategoryIds.FAVORITES)
+    }
+
+    @Test
+    fun `recent category stays visible in live tv even when history is empty`() = runTest {
+        val provider = Provider(
+            id = 12L,
+            name = "Provider",
+            type = ProviderType.M3U,
+            serverUrl = "http://test"
+        )
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(
+            flowOf(
+                listOf(
+                    Category(
+                        id = VirtualCategoryIds.FAVORITES,
+                        name = "Favorites",
+                        isVirtual = true
+                    )
+                )
+            )
+        )
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+
+        advanceUntilIdle()
+
+        val categories = viewModel.uiState.value.categories
+        assertThat(categories.map { it.id }).containsExactly(
+            VirtualCategoryIds.FAVORITES,
+            VirtualCategoryIds.RECENT,
+            ChannelRepository.ALL_CHANNELS_ID
+        )
+        assertThat(categories.first { it.id == VirtualCategoryIds.RECENT }.count).isEqualTo(0)
+    }
+
+    @Test
+    fun `last visited live category is exposed for quick return`() = runTest {
+        val provider = Provider(
+            id = 14L,
+            name = "Provider",
+            type = ProviderType.M3U,
+            serverUrl = "http://test"
+        )
+        val sportsCategory = Category(id = 5L, name = "Sports")
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(listOf(sportsCategory)))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(
+            flowOf(
+                listOf(
+                    Category(
+                        id = VirtualCategoryIds.FAVORITES,
+                        name = "Favorites",
+                        isVirtual = true
+                    )
+                )
+            )
+        )
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(preferencesRepository.getLastLiveCategoryId(provider.id)).thenReturn(flowOf(sportsCategory.id))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+
+        advanceUntilIdle()
+
+        assertThat(viewModel.uiState.value.lastVisitedCategory?.id).isEqualTo(sportsCategory.id)
+        assertThat(viewModel.uiState.value.lastVisitedCategory?.name).isEqualTo("Sports")
+    }
+
+    @Test
+    fun `selecting a live category remembers it for the current provider`() = runTest {
+        val provider = Provider(
+            id = 20L,
+            name = "Provider",
+            type = ProviderType.M3U,
+            serverUrl = "http://test"
+        )
+        val category = Category(id = 7L, name = "Kids")
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(listOf(category)))
+        whenever(channelRepository.getChannelsByCategoryPage(eq(provider.id), eq(category.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+
+        advanceUntilIdle()
+        viewModel.selectCategory(category)
+        advanceUntilIdle()
+
+        verify(preferencesRepository).setLastLiveCategoryId(provider.id, category.id)
+    }
+
+    @Test
+    fun `selecting recent does not overwrite remembered live group`() = runTest {
+        val provider = Provider(
+            id = 21L,
+            name = "Provider",
+            type = ProviderType.M3U,
+            serverUrl = "http://test"
+        )
+        val recentCategory = Category(
+            id = VirtualCategoryIds.RECENT,
+            name = "Recent",
+            type = ContentType.LIVE,
+            isVirtual = true
+        )
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+
+        advanceUntilIdle()
+        viewModel.selectCategory(recentCategory)
+        advanceUntilIdle()
+
+        verify(preferencesRepository, never()).setLastLiveCategoryId(provider.id, recentCategory.id)
+    }
+
+    @Test
+    fun `channel search delegates to repository for provider categories`() = runTest {
+        val provider = Provider(
+            id = 30L,
+            name = "Provider",
+            type = ProviderType.M3U,
+            serverUrl = "https://test"
+        )
+        val category = Category(id = 11L, name = "News")
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(listOf(category)))
+        whenever(channelRepository.getChannelsByCategoryPage(eq(provider.id), eq(category.id), any())).thenReturn(
+            flowOf(listOf(Channel(id = 1L, name = "BBC News", providerId = provider.id, streamUrl = "https://stream")))
+        )
+        whenever(channelRepository.searchChannelsByCategoryPaged(eq(provider.id), eq(category.id), eq("bbc"), any())).thenReturn(
+            flowOf(listOf(Channel(id = 1L, name = "BBC News", providerId = provider.id, streamUrl = "https://stream")))
+        )
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.selectCategory(category)
+        advanceUntilIdle()
+        viewModel.updateChannelSearchQuery("bbc")
+        advanceUntilIdle()
+
+        verify(channelRepository).searchChannelsByCategoryPaged(eq(provider.id), eq(category.id), eq("bbc"), any())
+    }
+
+    @Test
+    fun `hidden numbering mode keeps displayed channel numbers non-negative`() = runTest {
+        val provider = Provider(
+            id = 31L,
+            name = "Provider",
+            type = ProviderType.M3U,
+            serverUrl = "https://test"
+        )
+        val category = Category(id = 12L, name = "News")
+        val channel = Channel(
+            id = 1L,
+            name = "BBC News",
+            providerId = provider.id,
+            streamUrl = "https://stream",
+            number = 23
+        )
+        whenever(preferencesRepository.liveChannelNumberingMode).thenReturn(flowOf(ChannelNumberingMode.HIDDEN))
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(listOf(category)))
+        whenever(channelRepository.getChannelsByCategoryPage(eq(provider.id), eq(category.id), any())).thenReturn(flowOf(listOf(channel)))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.selectCategory(category)
+        advanceUntilIdle()
+
+        assertThat(viewModel.uiState.value.filteredChannels.map(Channel::number)).containsExactly(0)
+    }
+
+    @Test
+    fun `hideChannel delegates to repository with hidden=true and dismisses dialog`() = runTest {
+        val provider = Provider(id = 9L, name = "Acme", type = ProviderType.XTREAM_CODES, serverUrl = "url")
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        val channel = Channel(id = 77L, name = "BBC", streamUrl = "http://stream", providerId = provider.id)
+        viewModel.hideChannel(channel)
+        advanceUntilIdle()
+
+        verify(preferencesRepository).setChannelHidden(
+            providerId = provider.id,
+            channelId = 77L,
+            hidden = true
+        )
+        assertThat(viewModel.uiState.value.showDialog).isFalse()
+    }
+
+    @Test
+    fun `unhideCategory delegates to repository with hidden=false`() = runTest {
+        val provider = Provider(id = 9L, name = "Acme", type = ProviderType.XTREAM_CODES, serverUrl = "url")
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        val category = Category(id = 42L, name = "DELAY", type = ContentType.LIVE)
+        viewModel.unhideCategory(category)
+        advanceUntilIdle()
+
+        verify(preferencesRepository).setCategoryHidden(
+            providerId = provider.id,
+            type = ContentType.LIVE,
+            categoryId = 42L,
+            hidden = false
+        )
+    }
+
+    @Test
+    fun `unhideChannel delegates to repository with hidden=false`() = runTest {
+        val provider = Provider(id = 9L, name = "Acme", type = ProviderType.XTREAM_CODES, serverUrl = "url")
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        val channel = Channel(id = 77L, name = "BBC", streamUrl = "http://stream", providerId = provider.id)
+        viewModel.unhideChannel(channel)
+        advanceUntilIdle()
+
+        verify(preferencesRepository).setChannelHidden(
+            providerId = provider.id,
+            channelId = 77L,
+            hidden = false
+        )
+    }
+
+    @Test
+    fun `unhideAllLiveCategories clears the hidden set for live`() = runTest {
+        val provider = Provider(id = 9L, name = "Acme", type = ProviderType.XTREAM_CODES, serverUrl = "url")
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.unhideAllLiveCategories()
+        advanceUntilIdle()
+
+        verify(preferencesRepository).setHiddenCategoryIds(
+            providerId = provider.id,
+            type = ContentType.LIVE,
+            categoryIds = emptySet()
+        )
+    }
+
+    @Test
+    fun `unhideAllChannels clears the hidden set`() = runTest {
+        val provider = Provider(id = 9L, name = "Acme", type = ProviderType.XTREAM_CODES, serverUrl = "url")
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.unhideAllChannels()
+        advanceUntilIdle()
+
+        verify(preferencesRepository).setHiddenChannelIds(
+            providerId = provider.id,
+            channelIds = emptySet()
+        )
+    }
+
+    @Test
+    fun `unhideCategory is a no-op when no provider is active`() = runTest {
+        val category = Category(id = 42L, name = "DELAY", type = ContentType.LIVE)
+        viewModel.unhideCategory(category)
+        advanceUntilIdle()
+        verify(preferencesRepository, never()).setCategoryHidden(any(), any(), any(), any())
+    }
+
+    @Test
+    fun `hiddenLiveCategories surfaces categories whose id is in the hidden set`() = runTest {
+        val provider = Provider(id = 11L, name = "Acme", type = ProviderType.XTREAM_CODES, serverUrl = "url")
+        val visible = Category(id = 1L, name = "News", type = ContentType.LIVE)
+        val hidden = Category(id = 2L, name = "DELAY", type = ContentType.LIVE)
+        val alsoHidden = Category(id = 3L, name = "TNT HD", type = ContentType.LIVE)
+
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(listOf(visible, hidden, alsoHidden)))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+        whenever(preferencesRepository.getHiddenCategoryIds(provider.id, ContentType.LIVE))
+            .thenReturn(flowOf(setOf(2L, 3L)))
+
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        val state = viewModel.uiState.value
+        assertThat(state.hiddenLiveCategories.map(Category::id)).containsExactly(2L, 3L)
+    }
+
+    @Test
+    fun `hiddenChannelsLiveTv surfaces channels whose id is in the hidden set, in name order`() = runTest {
+        val provider = Provider(id = 11L, name = "Acme", type = ProviderType.XTREAM_CODES, serverUrl = "url")
+        val hiddenA = Channel(id = 2L, name = "Alpha", streamUrl = "http://a", providerId = provider.id)
+        val hiddenZ = Channel(id = 3L, name = "Zulu", streamUrl = "http://z", providerId = provider.id)
+
+        whenever(providerRepository.getActiveProvider()).thenReturn(flowOf(provider))
+        whenever(channelRepository.getCategories(provider.id)).thenReturn(flowOf(emptyList()))
+        whenever(getCustomCategories.invoke(eq(provider.id), eq(ContentType.LIVE))).thenReturn(flowOf(emptyList()))
+        whenever(playbackHistoryRepository.getRecentlyWatchedByProvider(eq(provider.id), any())).thenReturn(flowOf(emptyList()))
+        whenever(favoriteRepository.getFavorites(provider.id, ContentType.LIVE)).thenReturn(flowOf(emptyList()))
+        whenever(preferencesRepository.getHiddenChannelIds(provider.id))
+            .thenReturn(flowOf(setOf(2L, 3L)))
+        whenever(channelRepository.getChannelsByIds(any<List<Long>>()))
+            .thenReturn(flowOf(listOf(hiddenZ, hiddenA)))
+
+        viewModel = createViewModel()
+        // hiddenChannelsLiveTv uses SharingStarted.WhileSubscribed — keep a
+        // collector alive so the upstream flow actually emits.
+        backgroundScope.launch { viewModel.hiddenChannelsLiveTv.collect {} }
+        advanceUntilIdle()
+
+        val collected = viewModel.hiddenChannelsLiveTv.value
+        assertThat(collected.map(Channel::id)).containsExactly(2L, 3L).inOrder()
+        assertThat(collected.map(Channel::name)).containsExactly("Alpha", "Zulu").inOrder()
+    }
+}

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="cast_started">Bağlı cihaza yansıtılıyor.</string>
+    <string name="cast_unavailable">Google Cast bu cihazda kullanılamıyor.</string>
+    <string name="cast_stream_unsupported">Bu yayın formatı Google Cast tarafından desteklenmiyor.</string>
+    <string name="cast_protocol_unsupported">RTSP ve RTMP yayınları yansıtma için desteklenmiyor.</string>
+    <string name="cast_scoped_headers_unsupported">Eklenti istek başlıkları bir Cast alıcısına gönderilemez.</string>
+    <string name="cast_drm_unsupported">DRM korumalı yayınlar bu uygulamada Google Cast tarafından desteklenmiyor.</string>
+    <string name="cast_item_unavailable">Bu öğe bir Cast alıcısına gönderilemez.</string>
+    <string name="cast_local_url_unsupported">Bu yayın, Chromecast\'in doğrudan erişemeyeceği yerel veya yalnızca cihaza özel bir URL kullanıyor.</string>
+    <string name="cast_headers_unsupported">Bu yayın, Chromecast\'in doğrudan kullanamayacağı HTTP başlıkları veya çerezler gerektiriyor.</string>
+    <string name="cast_user_agent_unsupported">Bu yayın, Chromecast\'in doğrudan kullanamayacağı özel bir User-Agent gerektiriyor.</string>
+    <string name="cast_proxy_unsupported">Bu yayın uygulama proxy ayarlarını gerektirdiğinden Chromecast bunu doğrudan kullanamaz.</string>
+    <string name="cast_invalid_ssl_unsupported">Bu yayın, Chromecast\'in doğrudan kullanamayacağı bir SSL işleme yöntemi kullanıyor.</string>
+    <string name="cast_session_failed">Cast oturumu başlatılamadı.</string>
+    <string name="cast_load_failed">Cast alıcısı bu yayını yükleyemedi.</string>
+    <string name="cast_receiver_unavailable">Bağlı Cast alıcısı oynatma için hazır değil.</string>
+    <string name="cast_selection_cancelled">Cast cihazı seçimi iptal edildi.</string>
+    <string name="add_group_close_cd">Kapat</string>
+    <string name="player_archive_title">Program Arşivi</string>
+    <string name="player_no_archive">Arşivlenmiş program bulunamadı</string>
+    <string name="program_date_time_range">%1$s | %2$s – %3$s</string>
+    <string name="player_archive_badge">Arşiv</string>
+</resources>
