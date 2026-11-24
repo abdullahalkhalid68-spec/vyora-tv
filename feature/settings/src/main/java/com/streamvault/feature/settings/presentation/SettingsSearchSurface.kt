@@ -355,7 +355,7 @@ private fun resolvedSettingsCatalog(
         setting("about.donate", SettingsCategory.ABOUT, SettingsPage.APP_INFO, R.string.settings_donate, "support"),
         setting("about.close_app", SettingsCategory.ABOUT, SettingsPage.APP_INFO, R.string.settings_close_app, "exit"),
     )
-    (pageEntries + controlEntries).map { entry ->
+    (pageEntries + controlEntries).filterNot { it.category == SettingsCategory.ABOUT }.map { entry ->
         when {
             entry.id in unavailableIds -> entry.copy(available = false)
             entry.id in disabledExplanations -> entry.copy(
