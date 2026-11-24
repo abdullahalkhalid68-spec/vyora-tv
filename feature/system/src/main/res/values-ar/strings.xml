@@ -54,7 +54,7 @@
     <string name="plugins_install_file">تثبيت ملحق APK</string>
     <string name="plugins_install_hint">استخدم ملف APK أو رابط تنزيل APK مباشرًا. بالنسبة لروابط بيان الإضافات المتوافقة مع Stremio، استخدم تبويب إضافات Stremio.</string>
     <string name="plugins_empty_title">لا توجد ملحقات مثبتة</string>
-    <string name="plugins_empty_description">ثبّت تطبيقًا مرافقًا متوافقًا مع VYORA TV، أو أعد التحقق من ملحق مثبّت خارج StreamVault.</string>
+    <string name="plugins_empty_description">ثبّت تطبيقًا مرافقًا متوافقًا مع VYORA TV، أو أعد التحقق من ملحق مثبّت خارج VYORA TV.</string>
     <string name="plugins_provider_sources_count">%1$d مصادر مزوّد متاحة</string>
     <string name="plugins_details">التفاصيل</string>
     <string name="plugins_hide_details">إخفاء التفاصيل</string>
