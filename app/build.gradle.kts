@@ -128,7 +128,7 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix = if (xtreamSyncBenchmark) ".syncbenchmark" else ""
-            versionNameSuffix = "-debug"
+            
             buildConfigField("String", "XTREAM_DEV_SERVER", "\"${localProp("xtream.dev.server")}\"")
             buildConfigField("String", "XTREAM_DEV_USERNAME", "\"${localProp("xtream.dev.username")}\"")
             buildConfigField("String", "XTREAM_DEV_PASSWORD", "\"${localProp("xtream.dev.password")}\"")
