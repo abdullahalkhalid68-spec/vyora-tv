@@ -61,7 +61,9 @@ internal val SettingsCategory.icon: ImageVector get() = when (this) {
 private fun rememberRailListState(selectedCategory: Int, headerItemCount: Int): LazyListState {
     val listState = rememberLazyListState()
     LaunchedEffect(Unit) {
-        val index = SettingsCategory.entries.indexOfFirst { it.legacyId == selectedCategory } + headerItemCount
+        val visibleCategories = SettingsCategory.entries.filterNot { it == SettingsCategory.ABOUT }
+val categoryIndex = visibleCategories.indexOfFirst { it.legacyId == selectedCategory }
+val index = if (categoryIndex >= 0) categoryIndex + headerItemCount else -1
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.isNotEmpty() }.first { it }
         if (listState.layoutInfo.visibleItemsInfo.none { it.index == index }) {
             listState.scrollToItem((index - ENTRIES_ABOVE_SELECTED_ON_ENTRY).coerceAtLeast(0))
@@ -132,7 +134,7 @@ public fun SettingsNavigationRail(
                 contentPadding = PaddingValues(top = SettingsDesignTokens.space12, bottom = SettingsDesignTokens.space24),
                 verticalArrangement = Arrangement.spacedBy(SettingsDesignTokens.space4),
             ) {
-                items(SettingsCategory.entries, key = { it.legacyId }) { entry(it) }
+                items(SettingsCategory.entries.filterNot { it == SettingsCategory.ABOUT }, key = { it.legacyId }) { entry(it) }
             }
         }
     } else {
@@ -168,7 +170,7 @@ public fun SettingsNavigationRail(
                     }
                 }
             }
-            items(SettingsCategory.entries, key = { it.legacyId }) { entry(it) }
+            items(SettingsCategory.entries.filterNot { it == SettingsCategory.ABOUT }, key = { it.legacyId }) { entry(it) }
         }
     }
 }
